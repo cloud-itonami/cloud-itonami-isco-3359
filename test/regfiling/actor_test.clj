@@ -1,0 +1,53 @@
+(ns regfiling.actor-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [regfiling.actor :as actor]
+            [regfiling.store :as store]))
+
+(defn- fresh-store []
+  (let [st (store/mem-store)]
+    (store/register-office! st {:office-id "office-1" :name "District Regulatory Office"
+                                :max-supply-order-cost 2000})
+    (store/register-filing-case! st {:case-id "case-1" :office-id "office-1"
+                                     :name "case-042"})
+    st))
+
+(deftest commits-a-log-inspection-record-against-a-registered-case
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:office-id "office-1" :op :log-inspection-record :stake :low
+                 :case-id "case-1" :record-detail "site visit completed"}
+        result (actor/run-request! graph request {} "thread-1")]
+    (is (= :done (:status result)))
+    (is (some? (get-in result [:state :record])))
+    (is (= 1 (count (store/records-of st "office-1"))))))
+
+(deftest commits-a-within-threshold-supply-order
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:office-id "office-1" :op :coordinate-supply-order :stake :low
+                 :item "inspection tablets" :cost 500}
+        result (actor/run-request! graph request {} "thread-2")]
+    (is (= :done (:status result)))
+    (is (= 1 (count (store/records-of st "office-1"))))))
+
+(deftest holds-a-disallowed-op-never-commits
+  (testing "an :issue-compliance-ruling request never reaches commit -- no such op exists in the allowlist, so it is held, permanently, end to end through the graph"
+    (let [st (fresh-store)
+          graph (actor/build-graph {:store st})
+          request {:office-id "office-1" :op :issue-compliance-ruling :stake :low
+                   :case-id "case-1"}
+          result (actor/run-request! graph request {} "thread-3")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "office-1"))))))
+
+(deftest interrupts-then-approves-flag-compliance-concern-on-human-approval
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:office-id "office-1" :op :flag-compliance-concern :stake :low
+                 :case-id "case-1" :concern-detail "repeated late filings"}
+        interrupted (actor/run-request! graph request {} "thread-4")]
+    (is (= :interrupted (:status interrupted)))
+    (is (empty? (store/records-of st "office-1")))
+    (let [resumed (actor/approve! graph "thread-4")]
+      (is (= :done (:status resumed)))
+      (is (= 1 (count (store/records-of st "office-1")))))))

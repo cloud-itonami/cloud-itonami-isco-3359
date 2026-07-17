@@ -1,0 +1,148 @@
+(ns regfiling.governor-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [regfiling.store :as store]
+            [regfiling.advisor :as advisor]
+            [regfiling.governor :as governor]))
+
+(defn- fresh-store []
+  (let [st (store/mem-store)]
+    (store/register-office! st {:office-id "office-1" :name "District Regulatory Office"
+                                :max-supply-order-cost 2000})
+    (store/register-filing-case! st {:case-id "case-1" :office-id "office-1"
+                                     :name "case-042"})
+    st))
+
+(defn- log-op [case-id]
+  {:op :log-inspection-record :effect :propose :office-id "office-1"
+   :case-id case-id :record-detail "site visit completed"
+   :confidence 0.9 :stake :low})
+
+(defn- supply-op [cost]
+  {:op :coordinate-supply-order :effect :propose :office-id "office-1"
+   :item "inspection tablets" :cost cost
+   :confidence 0.9 :stake :low})
+
+(def ^:private req {:office-id "office-1"})
+
+(deftest ok-within-threshold-supply-order
+  (let [st (fresh-store)
+        v (governor/check req {} (supply-op 500) st)]
+    (is (:ok? v))))
+
+(deftest ok-at-exact-threshold-boundary
+  (testing "the supply-order cost threshold is inclusive"
+    (let [st (fresh-store)
+          v (governor/check req {} (supply-op 2000) st)]
+      (is (:ok? v)))))
+
+(deftest ok-log-inspection-record-against-registered-case
+  (let [st (fresh-store)
+        v (governor/check req {} (log-op "case-1") st)]
+    (is (:ok? v))))
+
+(deftest escalates-supply-order-over-threshold
+  (testing "an above-threshold procurement request is never blocked outright, it is routed to a human"
+    (let [st (fresh-store)
+          v (governor/check req {} (assoc (supply-op 50000) :confidence 0.99) st)]
+      (is (not (:hard? v)))
+      (is (:escalate? v)))))
+
+(deftest hard-on-unknown-case
+  (let [st (fresh-store)
+        v (governor/check req {} (log-op "case-ghost") st)]
+    (is (:hard? v))
+    (is (some #(= :unknown-case (:rule %)) (:violations v)))))
+
+(deftest hard-on-case-wrong-office
+  (let [st (fresh-store)]
+    (store/register-office! st {:office-id "office-2" :name "Other Office"
+                                :max-supply-order-cost 2000})
+    (let [v (governor/check {:office-id "office-2"} {} (log-op "case-1") st)]
+      (is (:hard? v))
+      (is (some #(= :case-wrong-office (:rule %)) (:violations v))))))
+
+(deftest hard-on-unregistered-office
+  (let [st (fresh-store)
+        v (governor/check {:office-id "nobody"} {} (log-op "case-1") st)]
+    (is (:hard? v))
+    (is (some #(= :no-office (:rule %)) (:violations v)))))
+
+(deftest hard-on-no-actuation-violation
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (log-op "case-1") :effect :direct-write) st)]
+    (is (:hard? v))
+    (is (some #(= :no-actuation (:rule %)) (:violations v)))))
+
+(deftest hard-on-disallowed-op-issue-compliance-ruling
+  (testing "there is no :issue-compliance-ruling op -- it is structurally absent from the allowlist, so it is hard-blocked, never merely escalated"
+    (let [st (fresh-store)
+          v (governor/check req {} {:op :issue-compliance-ruling :effect :propose
+                                    :office-id "office-1" :case-id "case-1"
+                                    :confidence 0.99 :stake :low} st)]
+      (is (:hard? v))
+      (is (not (:escalate? v)))
+      (is (some #(= :disallowed-op (:rule %)) (:violations v))))))
+
+(deftest hard-on-disallowed-op-impose-regulatory-penalty
+  (testing "there is no :impose-regulatory-penalty op -- structurally absent, hard-blocked"
+    (let [st (fresh-store)
+          v (governor/check req {} {:op :impose-regulatory-penalty :effect :propose
+                                    :office-id "office-1" :case-id "case-1"
+                                    :confidence 0.99 :stake :low} st)]
+      (is (:hard? v))
+      (is (some #(= :disallowed-op (:rule %)) (:violations v))))))
+
+(deftest hard-on-disallowed-op-order-enforcement-action
+  (testing "there is no :order-enforcement-action op -- structurally absent, hard-blocked"
+    (let [st (fresh-store)
+          v (governor/check req {} {:op :order-enforcement-action :effect :propose
+                                    :office-id "office-1" :case-id "case-1"
+                                    :confidence 0.99 :stake :low} st)]
+      (is (:hard? v))
+      (is (some #(= :disallowed-op (:rule %)) (:violations v))))))
+
+(deftest hard-on-scope-exclusion-phrase-in-rationale
+  (testing "an otherwise-allowlisted op is still hard-blocked if its free text describes finalizing an enforcement action (defense in depth)"
+    (let [st (fresh-store)
+          v (governor/check req {}
+                             (assoc (log-op "case-1")
+                                    :record-detail "recommend we issue the compliance ruling directly")
+                             st)]
+      (is (:hard? v))
+      (is (some #(= :scope-exclusion-hit (:rule %)) (:violations v))))))
+
+(deftest always-escalates-flag-compliance-concern-even-at-high-confidence
+  (testing "any observation that might warrant regulatory action is surfaced only via :flag-compliance-concern, which always escalates to a human"
+    (let [st (fresh-store)
+          v (governor/check req {} {:op :flag-compliance-concern :effect :propose
+                                    :office-id "office-1" :case-id "case-1"
+                                    :concern-detail "repeated filing discrepancy"
+                                    :confidence 0.99 :stake :low} st)]
+      (is (not (:hard? v)))
+      (is (:escalate? v)))))
+
+(deftest escalates-low-confidence
+  (let [st (fresh-store)
+        v (governor/check req {} (assoc (log-op "case-1") :confidence 0.3) st)]
+    (is (not (:hard? v)))
+    (is (:escalate? v))))
+
+(deftest default-mock-advisor-proposals-never-self-trip
+  (testing "the mock advisor's default rationale text for every op in the closed allowlist -- including :flag-compliance-concern, whose rationale legitimately mentions the bare nouns \"ruling\" and \"penalty\" as a benign observation -- never trips the governor's scope-exclusion or disallowed-op hard rules. Only ACTION-phrased scope-exclusion terms (\"issue the compliance ruling\", not bare \"ruling\") avoid this false-positive."
+    (let [st (fresh-store)
+          adv (advisor/mock-advisor)
+          requests [{:office-id "office-1" :op :log-inspection-record :case-id "case-1"
+                     :record-detail "site visit completed" :stake :low}
+                    {:office-id "office-1" :op :schedule-review-appointment :case-id "case-1"
+                     :proposed-time "2026-08-01T10:00Z" :stake :low}
+                    {:office-id "office-1" :op :flag-compliance-concern :case-id "case-1"
+                     :concern-detail "repeated late filings" :stake :low}
+                    {:office-id "office-1" :op :coordinate-supply-order
+                     :item "inspection tablets" :cost 500 :stake :low}]]
+      (doseq [request requests]
+        (let [proposal (advisor/-advise adv st request)
+              v (governor/check request {} proposal st)]
+          (is (not (:hard? v))
+              (str "op " (:op request) " unexpectedly hard-blocked: " (:violations v)))
+          (is (not (some #(= :scope-exclusion-hit (:rule %)) (:violations v)))
+              (str "op " (:op request) " false-tripped scope-exclusion on its own default rationale")))))))
