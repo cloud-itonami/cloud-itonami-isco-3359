@@ -81,7 +81,7 @@
                                 procurement spend).
     8. low confidence (< `confidence-floor`)."
   (:require [regfiling.store :as store]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (def confidence-floor 0.6)
 
@@ -115,7 +115,7 @@
    "order an enforcement action"])
 
 (defn- proposal-text-blob [proposal]
-  (str/lower-case (str/join " " (keep (fn [[_ v]] (when (string? v) v)) proposal))))
+  (str/lower (str/join " " (keep (fn [[_ v]] (when (string? v) v)) proposal))))
 
 (defn scope-exclusion-hit? [proposal]
   (let [blob (proposal-text-blob proposal)]
