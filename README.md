@@ -31,7 +31,7 @@ automatically. See "No-enforcement-authority guarantee" below.
 (ADR-2607011000): `:intake -> :advise -> :govern -> :decide -+-> :commit
 (:ok? true) +-> :request-approval (:escalate? true, human-in-the-loop
 interrupt) +-> :hold (:hard? true)`. 19 tests / 45 assertions green
-(`clojure -M:test`).
+(`kbb -M:test`).
 
 HARD invariants (always hold, never overridable): office provenance (the
 government office/regulatory unit must be registered), no-actuation
