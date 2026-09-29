@@ -1,6 +1,6 @@
 (ns regfiling.store
   "SSoT for the ISCO-08 3359 regulatory-filing coordination practice
-  actor (itonami actor pattern, ADR-2607011000 / CLAUDE.md Actors
+  actor (itonami actor pattern, ADR-2607011000 / AGENTS.md Actors
   section; README's 'Robotics premise' — a regulatory-filing
   documentation and logistics-coordination robot performs case-file
   data entry, appointment scheduling and office-supply coordination
